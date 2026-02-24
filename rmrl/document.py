@@ -15,10 +15,12 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import gc
+import io
 import json
 import logging
 
 from reportlab.graphics import renderPDF
+from reportlab.lib.utils import ImageReader
 from svglib.svglib import svg2rlg
 
 from . import lines, pens
@@ -50,58 +52,31 @@ class DocumentPage:
 
         # Try to load template
         self.template = None
-        template_names = []
-        pagedatapath = '{ID}.pagedata'
-        if source.exists(pagedatapath):
-            with source.open(pagedatapath, 'r') as f:
-                template_names = f.read().splitlines()
+        templatefilepath = f'{{ID}}.pagedata'
+        if source.exists(templatefilepath):
+            with source.open(templatefilepath, 'r') as f:
+                templatenames = f.read().splitlines()
+            if pagenum < len(templatenames):
+                templatename = templatenames[pagenum]
+                templatefile = TEMPLATE_PATH / (templatename + '.svg')
+                if templatefile.exists():
+                    self.template = str(templatefile)
 
-        if template_names:
-            # I have encountered an issue with some PDF files, where the
-            # rM won't save the page template for later pages. In this
-            # case, just take the last-available page template, which
-            # is usually 'Blank'.
-            template_name = template_names[max(self.num, len(template_names) - 1)]
-            template_path = TEMPLATE_PATH / f'{template_name}.svg'
-            if template_name != 'Blank' and template_path.exists():
-                self.template = str(template_path)
-
-        # Load layers
+        # Load page
         self.layers = []
-        self.load_layers()
-
-    def get_grouped_annotations(self):
-        # Return the annotations grouped by proximity. If they are
-        # within a distance of each other, count them as a single
-        # annotation.
-
-        # Annotations should be delivered in an array, where each
-        # index is a tuple (LayerName,
-        annotations = []
-        for layer in self.layers:
-            annotations.append(layer.get_grouped_annotations())
-        return annotations
-
-    def load_layers(self):
-        # Loads layers from the .rm files
-
-        if not self.source.exists(self.rmpath):
-            # no layers, obv
+        if not source.exists(self.rmpath):
             return
 
-        # Load reMy version of page layers
-        pagelayers = None
-        with self.source.open(self.rmpath, 'rb') as f:
-            _, pagelayers = lines.readLines(f)
+        with source.open(self.rmpath, 'rb') as f:
+            page_version, layerdata = lines.readLines(f)
 
-        # Load layer data
-        for i in range(0, len(pagelayers)):
-            layerstrokes = pagelayers[i]
+        for i, layerstrokes in enumerate(layerdata):
+            name = 'Layer ' + str(i + 1)
 
             try:
                 name = self.metadict['layers'][i]['name']
             except:
-                name = 'Layer ' + str(i + 1)
+                pass
 
             layer = DocumentPageLayer(self, name=name)
             layer.strokes = layerstrokes
@@ -120,33 +95,73 @@ class DocumentPage:
                     canvas.setFillAlpha(1 - template_alpha)
                     canvas.rect(0, 0, PDFWIDTH, PDFHEIGHT, fill=True, stroke=False)
                     canvas.restoreState()
-            # Bitmaps are rendered into the PDF as XObjects, which are
-            # easy to pick out for layers. Vectors will render
-            # everything inline, and so we need to add a 'magic point'
-            # to mark the end of the template layer.
-            if False and vector:  #TODO
-                pen = GenericPen(color=Qt.transparent, vector=vector)
-                painter.setPen(pen)
-                painter.drawPoint(800, 85)
 
-        # The annotation coordinate system is upside down compared to the PDF
-        # coordinate system, so offset the bottom to the top and then flip
-        # vertically along the old bottom / new top to place the annotations
-        # correctly.
-        canvas.translate(0, PDFHEIGHT)
-        canvas.scale(PTPERPX, -PTPERPX)
-        # Render user layers
-        for layer in self.layers:
-            # Bitmaps are rendered into the PDF as XObjects, which are
-            # easy to pick out for layers. Vectors will render
-            # everything inline, and so we need to add a 'magic point'
-            # to mark the beginning of layers.
-            if False and vector:  #TODO
-                pen = GenericPen(color=Qt.transparent, vector=vector)
-                painter.setPen(pen)
-                painter.drawPoint(420, 69)
-            layer.render_to_painter(canvas, vector)
+        if vector:
+            # Vector mode: apply coordinate transform and render directly
+            canvas.translate(0, PDFHEIGHT)
+            canvas.scale(PTPERPX, -PTPERPX)
+            for layer in self.layers:
+                layer.render_to_painter(canvas, vector)
+        else:
+            # Raster mode: render all layers to a QImage, then embed
+            # in the PDF as a PNG image. This enables texture brushes.
+            self._render_raster_layers(canvas)
+
         canvas.showPage()
+
+    def _render_raster_layers(self, pdf_canvas):
+        """Render all layers to a QImage and embed in PDF."""
+        from PyQt5.QtCore import Qt, QBuffer, QIODevice
+        from PyQt5.QtGui import QImage, QPainter
+        from .qpainter_canvas import QPainterCanvas
+
+        scale = 4  # 4x device resolution — good detail when zoomed in
+                   # (higher = better zoom quality, more memory/file size)
+        img_w = DISPLAY['screenwidth'] * scale
+        img_h = DISPLAY['screenheight'] * scale
+
+        # Pre-allocate buffer to avoid QImage memory corruption
+        bytespp = 4
+        buf = bytearray(img_w * img_h * bytespp)
+        qimage = QImage(buf, img_w, img_h, img_w * bytespp,
+                        QImage.Format_ARGB32)
+        qimage.fill(Qt.white)
+
+        imgpainter = QPainter(qimage)
+        imgpainter.setRenderHint(QPainter.Antialiasing)
+        imgpainter.scale(scale, scale)
+
+        # Use the adapter so pen classes work with QPainter
+        adapter = QPainterCanvas(imgpainter)
+        for layer in self.layers:
+            layer.paint_strokes(adapter, vector=False)
+        imgpainter.end()
+
+        # Convert QImage to PNG bytes
+        qbuffer = QBuffer()
+        qbuffer.open(QIODevice.WriteOnly)
+        qimage.save(qbuffer, 'PNG')
+        qbuffer.close()
+        png_buf = io.BytesIO(bytes(qbuffer.data()))
+
+        # Draw into PDF at full page size (no transform needed —
+        # we're in the original PDF coordinate space)
+        img_reader = ImageReader(png_buf)
+        pdf_canvas.drawImage(img_reader,
+                             0, 0,
+                             PDFWIDTH, PDFHEIGHT,
+                             preserveAspectRatio=False)
+
+        del imgpainter
+        del qimage
+        del buf
+        gc.collect()
+
+    def get_grouped_annotations(self):
+        annots = []
+        for layer in self.layers:
+            annots.append(layer.get_grouped_annotations())
+        return annots
 
 
 class DocumentPageLayer:
@@ -157,9 +172,6 @@ class DocumentPageLayer:
         self.name = name
 
         self.colors = [
-            #QSettings().value('pane/notebooks/export_pdf_blackink'),
-            #QSettings().value('pane/notebooks/export_pdf_grayink'),
-            #QSettings().value('pane/notebooks/export_pdf_whiteink')
             (0, 0, 0),
             (0.5, 0.5, 0.5),
             (1, 1, 1)
@@ -241,34 +253,5 @@ class DocumentPageLayer:
             qpen.paint_stroke(canvas, stroke)
 
     def render_to_painter(self, painter, vector):
-        if vector: # Turn this on with vector otherwise off to get hybrid
-            self.paint_strokes(painter, vector=vector)
-            return
+        self.paint_strokes(painter, vector=vector)
 
-        assert False
-
-        # I was having problems with QImage corruption (garbage data)
-        # and memory leaking on large notebooks. I fixed this by giving
-        # the QImage a reference array to pre-allocate RAM, then reset
-        # the reference count after I'm done with it, so that it gets
-        # cleaned up by the python garbage collector.
-
-        devpx = DISPLAY['screenwidth'] \
-            * DISPLAY['screenheight']
-        bytepp = 4  # ARGB32
-        qimage = QImage(b'\0' * devpx * bytepp,
-                        DISPLAY['screenwidth'],
-                        DISPLAY['screenheight'],
-                        QImage.Format_ARGB32)
-
-        imgpainter = QPainter(qimage)
-        imgpainter.setRenderHint(QPainter.Antialiasing)
-        #imgpainter.setRenderHint(QPainter.LosslessImageRendering)
-        self.paint_strokes(imgpainter, vector=vector)
-        imgpainter.end()
-
-        painter.drawImage(0, 0, qimage)
-
-        del imgpainter
-        del qimage
-        gc.collect()

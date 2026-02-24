@@ -35,7 +35,8 @@ def render(source, *,
            progress_cb=lambda x: None,
            expand_pages=True,
            template_alpha=0.3,
-           only_annotated=False):
+           only_annotated=False,
+           vector=True):
     """
     Render a source document as a PDF file.
 
@@ -59,9 +60,12 @@ def render(source, *,
                     makes the templates invisible, 1 makes them fully dark.
     only_annotated: Boolean value (default False) indicating whether only
                     pages with annotations should be output.
+    vector: Boolean value (default True) indicating rendering mode.
+            True for scalable vector output (no textures).
+            False for raster output with texture brushes (pencil grain,
+            paintbrush textures). Requires PyQt5.
     """
 
-    vector=True  # TODO: Different rendering styles
     source = sources.get_source(source)
 
     # If this is using a base PDF, the percentage is calculated

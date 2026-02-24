@@ -27,29 +27,16 @@ class MechanicalPencilPen(GenericPen):
         canvas.setLineWidth(segment.width / 1.5)
 
         # Set the brush/pattern
-        if self.vector:
+        if self.vector or PENCIL_TEXTURES is None or not hasattr(canvas, 'setTextureBrush'):
             stroke_color = [1 - (1 - c) * segment.pressure for c in self.color]
             canvas.setStrokeColor(stroke_color)
         else:
-            assert False
-            brush.setColor(self.color())
+            # Raster mode: pressure-stepped linear textures
+            # Original code selected from get_linear at specific pressure levels
             texture = PENCIL_TEXTURES.get_linear(0.00)
-            pressure_textures = [
-                PENCIL_TEXTURES.get_linear(0.10),
-                PENCIL_TEXTURES.get_linear(0.15),
-                PENCIL_TEXTURES.get_linear(0.20),
-                PENCIL_TEXTURES.get_linear(0.25),
-                PENCIL_TEXTURES.get_linear(0.30),
-                PENCIL_TEXTURES.get_linear(0.40),
-                PENCIL_TEXTURES.get_linear(0.50),
-                PENCIL_TEXTURES.get_linear(0.60),
-                PENCIL_TEXTURES.get_linear(0.70),
-                PENCIL_TEXTURES.get_linear(0.80),
-                PENCIL_TEXTURES.get_linear(0.90)
-            ]
-            for n, tex in enumerate(pressure_textures):
-                threshold = n / len(pressure_textures)
+            pressure_levels = [0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90]
+            for n, level in enumerate(pressure_levels):
+                threshold = n / len(pressure_levels)
                 if segment.pressure >= threshold:
-                    texture = tex
-            brush.setTextureImage(texture)
-            self.setBrush(brush)
+                    texture = PENCIL_TEXTURES.get_linear(level)
+            canvas.setTextureBrush(texture)

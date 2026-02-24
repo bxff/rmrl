@@ -50,18 +50,16 @@ class PaintbrushPen(GenericPen):
         # produce really light strokes.
         press_mod *= 2 - (segment.speed / 75)
 
-        if self.vector:
+        if self.vector or PENCIL_TEXTURES is None or not hasattr(canvas, 'setTextureBrush'):
             stroke_color = [1 - (1 - c) * press_mod / 2 for c in self.color]
             canvas.setStrokeColor(stroke_color)
         else:
-            assert False
+            # Raster mode: direction-rotated paintbrush texture
+            from PyQt5.QtGui import QTransform
             angle = math.degrees(nextsegment.direction) + 90
             transform = QTransform().rotate(angle)
-
             texture = PENCIL_TEXTURES.get_log_paintbrush(press_mod)
-            brush.setTextureImage(texture)
-            brush.setTransform(transform)
-            self.setBrush(brush)
+            canvas.setTextureBrush(texture, transform)
 
         # If the segment is short, use a round cap.
         distance = point_distance(segment.x, segment.y,

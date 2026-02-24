@@ -14,7 +14,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-from .generic import GenericPen
+from .generic import GenericPen, pairs
 from .textures import PENCIL_TEXTURES
 
 class PencilPen(GenericPen):
@@ -29,83 +29,43 @@ class PencilPen(GenericPen):
         stroke_color = [1 - (1 - c) * segment.pressure for c in self.color]
         canvas.setStrokeColor(stroke_color)
 
-    def old_paint_stroke(self, painter, stroke):
-        assert False
-        brush = QBrush()
-        brush.setColor(self.color())
+    def set_segment_properties_raster(self, canvas, segment, nextsegment):
+        """Raster mode: use texture brush instead of color blending."""
+        basewidth = segment.width
+        deltamax = 0.42 * basewidth
+        delta = -deltamax
+        prim_width = basewidth + delta
+        canvas.setLineWidth(prim_width)
 
-        # if self.vector:
-        #     path = QPainterPath()
-        #     path.moveTo(stroke.segments[0].x, stroke.segments[0].y)
-        #     for i, segment in enumerate(stroke.segments, 1):
-        #         path.lineTo(segment.x, segment.y)
-        #     self.setWidthF(stroke.width)
-        #     painter.setPen(self)
-        #     painter.drawPath(path)
-        #     return
+        texture = PENCIL_TEXTURES.get_log(segment.pressure)
+        canvas.setTextureBrush(texture)
 
-        for i, segment in enumerate(stroke.segments):
-            if i+1 >= len(stroke.segments):
-                # no next segment, last 'to' point
-                break
+    def paint_stroke(self, canvas, stroke):
+        """Override to add spatter pass in raster mode."""
+        canvas.saveState()
+        canvas.setLineCap(1)  # Rounded
+        canvas.setLineJoin(1)  # Round join
+        canvas.setStrokeColor(self.color)
 
-            nextsegment = stroke.segments[i+1]
+        use_raster = PENCIL_TEXTURES is not None and hasattr(canvas, 'setTextureBrush')
 
-            # # Direction has something to do with the brush shape...
-            # print(segment.direction)
+        for p1, p2 in pairs(stroke.segments):
+            if use_raster:
+                # Primary stroke with texture
+                self.set_segment_properties_raster(canvas, p1, p2)
+                canvas.line(p1.x, p1.y, p2.x, p2.y)
 
-            # I experimented with a weighted pressure, but I don't think
-            # the rM uses it! So, use a static pressure.
-            # Experiment details: look at previous _n_ segment pressures
-            # and average, where n={5,10,20,50,100,200) -- all this does
-            # is blur the pressures, and all make it look further than
-            # the truth.
-
-            # # If the segment is short, use a round cap.
-            # distance = point_distance(segment.x, segment.y,
-            #                           nextsegment.x, nextsegment.y)
-            # if distance < newwidth / 2:
-            #     self.setCapStyle(Qt.RoundCap)
-            # else:
-            #     self.setCapStyle(Qt.FlatCap)
-
-            # There is a spatter around the pencil. We are going to draw
-            # two strokes: one for the primary, and another for the
-            # spatter. The spatter is drawn first, so that it appears
-            # behind in the vector versions.
-
-            # Draw primary stroke
-            basewidth = segment.width
-            deltamax = 0.42 * basewidth
-            delta = -deltamax
-            prim_width = basewidth + delta
-            self.setWidthF(prim_width)
-
-            if self.vector:
-                if not self.ocolor:
-                    self.ocolor = self.color()
-                ncolor = QColor()
-                ncolor.setRedF(1 - ((1 - self.ocolor.redF()) * segment.pressure))
-                ncolor.setGreenF(1 - ((1 - self.ocolor.greenF()) * segment.pressure))
-                ncolor.setBlueF(1 - ((1 - self.ocolor.blueF()) * segment.pressure))
-                self.setColor(ncolor)
-            else:
-                texture = PENCIL_TEXTURES.get_log(segment.pressure)
-                brush.setTextureImage(texture)
-                self.setBrush(brush)
-            painter.setPen(self)
-            painter.drawLine(QLineF(segment.x, segment.y,
-                                    nextsegment.x, nextsegment.y))
-
-            # Draw spatter stroke, but only if not vector because there
-            # are compositing problems.
-            if not self.vector:
+                # Spatter stroke (wider, lighter texture)
+                basewidth = p1.width
+                deltamax = 0.42 * basewidth
+                prim_width = basewidth - deltamax
                 spat_width = prim_width * 1.25
-                self.setWidthF(spat_width)
+                canvas.setLineWidth(spat_width)
+                texture = PENCIL_TEXTURES.get_log(p1.pressure * 0.7)
+                canvas.setTextureBrush(texture)
+                canvas.line(p1.x, p1.y, p2.x, p2.y)
+            else:
+                self.set_segment_properties(canvas, p1, p2)
+                canvas.line(p1.x, p1.y, p2.x, p2.y)
 
-                texture = PENCIL_TEXTURES.get_log(segment.pressure * 0.7)
-                brush.setTextureImage(texture)
-                self.setBrush(brush)
-                painter.setPen(self)
-                painter.drawLine(QLineF(segment.x, segment.y,
-                                        nextsegment.x, nextsegment.y))
+        canvas.restoreState()
